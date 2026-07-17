@@ -1645,7 +1645,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     public var hasText: Bool {
-        return !textInputStorage.isEmpty
+        // UITextInput storage only tracks local composition. The remote line
+        // can still contain history, pasted text, or input written by another
+        // terminal client, so Backspace must remain available in every state.
+        return true
     }
 
     func isAutoPeriodReplacement(_ text: String) -> Bool {

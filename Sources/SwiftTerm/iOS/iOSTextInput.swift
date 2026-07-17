@@ -193,6 +193,16 @@ extension TerminalView: UITextInput {
     */
     public var selectedTextRange: UITextRange? {
         get {
+            // `textInputStorage` is only the local IME composition mirror. An
+            // empty mirror says nothing about remote history, pasted text, or
+            // TUI-owned input. Exposing a zero-length selection at document
+            // offset zero makes the iOS keyboard treat that position as a hard
+            // deletion boundary and stop a held Backspace after one callback.
+            // Nil accurately reports that there is no local selection while
+            // leaving `UIKeyInput.hasText` authoritative for the remote line.
+            if textInputStorage.isEmpty, _markedTextRange == nil {
+                return nil
+            }
             return _selectedTextRange
         }
         set {
