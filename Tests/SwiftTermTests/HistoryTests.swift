@@ -113,4 +113,24 @@ final class HistoryTests {
             "Changing the grid width must not allocate all unused scrollback capacity."
         )
     }
+
+    @Test func testResizeNarrowerKeepsUnusedScrollbackCapacityLazy() {
+        let buffer = Buffer(cols: 80, rows: 39, tabStopWidth: 8, scrollback: 8_000)
+        buffer.fillViewportRows()
+
+        let activeLineCount = buffer.lines.count
+        #expect(activeLineCount == 39)
+        #expect(
+            buffer.lines.getArray().compactMap { $0 }.count == activeLineCount,
+            "Only active viewport rows should be materialized before a resize."
+        )
+
+        buffer.resize(newCols: 54, newRows: 39)
+
+        #expect(buffer.lines.count == activeLineCount)
+        #expect(
+            buffer.lines.getArray().compactMap { $0 }.count == activeLineCount,
+            "Narrowing to the iPhone grid must not allocate unused scrollback capacity."
+        )
+    }
 }
