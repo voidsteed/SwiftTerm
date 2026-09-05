@@ -930,6 +930,46 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         panTask?.cancel()
         panTask = nil
     }
+
+    private func selectionHit (forViewportPoint viewportPoint: CGPoint) -> Position {
+        let maxX = max(0, bounds.width - 1)
+        let maxY = max(0, bounds.height - 1)
+        let clampedViewportPoint = CGPoint(
+            x: min(max(viewportPoint.x, 0), maxX),
+            y: min(max(viewportPoint.y, 0), maxY)
+        )
+        return calculateTapHit(
+            point: CGPoint(
+                x: clampedViewportPoint.x + contentOffset.x,
+                y: clampedViewportPoint.y + contentOffset.y
+            )
+        ).grid
+    }
+
+    private func autoScrollSelection (forViewportPoint viewportPoint: CGPoint) {
+        let verticalOverflow: CGFloat
+        if viewportPoint.y < 0 {
+            verticalOverflow = viewportPoint.y
+        } else if viewportPoint.y > bounds.height {
+            verticalOverflow = viewportPoint.y - bounds.height
+        } else {
+            return
+        }
+
+        let maxStep: CGFloat = 80
+        let scrollStep = min(max(verticalOverflow, -maxStep), maxStep)
+        let minOffsetY = -adjustedContentInset.top
+        let maxOffsetY = max(
+            minOffsetY,
+            contentSize.height + adjustedContentInset.bottom - bounds.height
+        )
+        let nextOffsetY = min(max(contentOffset.y + scrollStep, minOffsetY), maxOffsetY)
+
+        guard nextOffsetY != contentOffset.y else { return }
+        setContentOffset(CGPoint(x: contentOffset.x, y: nextOffsetY), animated: false)
+        selection.pivotExtend(bufferPosition: selectionHit(forViewportPoint: viewportPoint))
+        requestDisplay()
+    }
     
     // The start of the pan operation, for the case where we are not sending the input to the client
     var panStart: Position?
@@ -960,16 +1000,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
             panStart = hit
         case .changed:
-            let absoluteY = gestureRecognizer.location (in: self).y - contentOffset.y
-            let hit = calculateTapHit(gesture: gestureRecognizer).grid
+            let contentLocation = gestureRecognizer.location (in: self)
+            let viewportPoint = CGPoint(
+                x: contentLocation.x - contentOffset.x,
+                y: contentLocation.y - contentOffset.y
+            )
+            let hit = selectionHit(forViewportPoint: viewportPoint)
             if selection.active {
                 stopSelectionTimer()
                 selection.pivotExtend(bufferPosition: hit)
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
-                if absoluteY < 0 || absoluteY > bounds.height {
+                if viewportPoint.y < 0 || viewportPoint.y > bounds.height {
                     startSelectionTimer {
-                        let newPlace = CGRect (x: 0, y: max (0, self.contentOffset.y+absoluteY), width: self.bounds.width, height: self.bounds.height)
-                        self.scrollRectToVisible(newPlace, animated: true)
+                        self.autoScrollSelection(forViewportPoint: viewportPoint)
                     }
                 }
                 requestDisplay()
@@ -1602,7 +1645,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     public var hasText: Bool {
-        return !textInputStorage.isEmpty
+        // UITextInput storage only tracks local composition. The remote line
+        // can still contain history, pasted text, or input written by another
+        // terminal client, so Backspace must remain available in every state.
+        return true
     }
 
     func isAutoPeriodReplacement(_ text: String) -> Bool {

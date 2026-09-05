@@ -38,7 +38,7 @@ final class SynchronizedOutputTests {
         ).replacingOccurrences(of: "\u{0}", with: " ")
     }
 
-    @Test func testSynchronizedOutputBlocksDisplayUntilReset() {
+    @Test func testSynchronizedOutputTracksLiveBufferUntilReset() {
         let terminal = Terminal(
             delegate: TestDelegate(),
             options: TerminalOptions(cols: 20, rows: 5, scrollback: 0)
@@ -51,14 +51,16 @@ final class SynchronizedOutputTests {
         terminal.feed(text: "\(esc)[?2026h")
         terminal.feed(text: "\(esc)[2J\(esc)[HNEW")
 
-        #expect(topLineText(from: terminal.displayBuffer).hasPrefix("OLD"))
+        #expect(terminal.synchronizedOutputActive)
+        #expect(topLineText(from: terminal.displayBuffer).hasPrefix("NEW"))
         #expect(topLineText(from: terminal.buffer).hasPrefix("NEW"))
 
         terminal.feed(text: "\(esc)[?2026l")
+        #expect(!terminal.synchronizedOutputActive)
         #expect(topLineText(from: terminal.displayBuffer).hasPrefix("NEW"))
     }
 
-    /// Regression: setViewYDisp must update both live and frozen buffers
+    /// Regression: setViewYDisp must keep the live display buffer in sync
     /// during synchronized output so user-initiated scrolling is not dropped.
     @Test func testViewportScrollDuringSyncUpdatesBothBuffers() {
         let terminal = Terminal(

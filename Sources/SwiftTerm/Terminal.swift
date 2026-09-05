@@ -776,6 +776,109 @@ open class Terminal {
         }
         return getCharacter(for: charData)
     }
+
+    /// Replaces the primary screen and scrollback with a rendered text capture, while
+    /// retaining this terminal's live parser, modes, palette, saved cursor, and protocol
+    /// state. No source bytes are replayed and no terminal responses are generated.
+    ///
+    /// Both terminals must be at a complete parser/UTF-8 boundary, outside synchronized
+    /// output, on their primary buffers, and have matching geometry and width options.
+    /// The source must contain no images, pending graphics transfer, or open hyperlink.
+    /// Call this between `feed` calls, using an isolated terminal containing the
+    /// authoritative text capture.
+    ///
+    /// The newest history that fits this terminal's scrollback capacity is retained. The
+    /// source cursor becomes current, the display returns to the bottom, and absolute line
+    /// indices start a new epoch at zero. Hosts should discard selection/search coordinates
+    /// from the previous contents. A successful import marks all rows dirty and emits one
+    /// scroll notification; a rejected import leaves this terminal unchanged.
+    @discardableResult
+    public func replacePrimaryBufferContents(from source: Terminal) -> Bool {
+        guard source !== self,
+              !isCurrentBufferAlternate, !source.isCurrentBufferAlternate,
+              cols == source.cols, rows == source.rows,
+              options.regionalIndicatorWidth == source.options.regionalIndicatorWidth,
+              !synchronizedOutputActive, !source.synchronizedOutputActive,
+              parser.currentState == .ground, source.parser.currentState == .ground,
+              readingBuffer.putbackBuffer.isEmpty, source.readingBuffer.putbackBuffer.isEmpty,
+              kittyPlacementContext == nil, source.kittyPlacementContext == nil,
+              source.kittyGraphicsState.pending == nil,
+              source.hyperLinkTracking == nil,
+              !source.normalBuffer.hasAnyImages,
+              !source.kittyGraphicsState.placementsByKey.values.contains(where: { !$0.isAlternateBuffer })
+        else { return false }
+
+        let captured = source.normalBuffer
+        guard captured.yBase >= 0,
+              captured.yBase <= captured.lines.count - rows,
+              captured.x >= 0, captured.x <= cols,
+              captured.y >= 0, captured.y < rows
+        else { return false }
+
+        let end = captured.yBase + rows
+        let start = max(0, end - normalBuffer.getCorrectBufferLength(rows))
+        guard (0..<end).allSatisfy({ captured.lines[$0].count == cols && captured.lines[$0].images == nil })
+        else { return false }
+
+        // Combining characters may arrive in the next feed, even after a cursor motion.
+        // Preserve that context only when the same visible glyph survives the capture.
+        // History rows have no reliable coordinate correspondence across this replacement.
+        let last = normalBuffer.lastBufferStorage
+        let lastVisibleRow = last.y - normalBuffer.yBase
+        var combiningPosition: (y: Int, x: Int, cols: Int, rows: Int)?
+        if last.cols == cols, last.rows == rows, last.x >= 0,
+           lastVisibleRow >= 0, lastVisibleRow < rows,
+           last.y >= 0, last.y < normalBuffer.lines.count {
+            let x = min(last.x, cols - 1)
+            let previous = normalBuffer.lines[last.y][x]
+            let replacement = captured.lines[captured.yBase + lastVisibleRow][x]
+            if previous.width > 0, previous.width == replacement.width,
+               getCharacter(for: previous) == source.getCharacter(for: replacement) {
+                combiningPosition = (captured.yBase - start + lastVisibleRow, x, cols, rows)
+            }
+        }
+
+        var replacementLines: [BufferLine] = []
+        replacementLines.reserveCapacity(end - start)
+        for row in start..<end {
+            let original = captured.lines[row]
+            let copy = BufferLine(cols: cols, isWrapped: original.isWrapped)
+            copy.renderMode = original.renderMode
+            for col in 0..<cols {
+                var cell = original[col]
+                // Complex grapheme IDs belong to their Terminal, unlike payload atoms.
+                if !cell.isSimpleRune {
+                    updateCharData(&cell, char: source.getCharacter(for: cell), size: Int32(cell.width))
+                }
+                copy[col] = cell
+            }
+            replacementLines.append(copy)
+        }
+
+        normalBuffer.replaceContents(lines: replacementLines, cursorX: captured.x, cursorY: captured.y)
+        if let combiningPosition {
+            normalBuffer.lastBufferStorage = combiningPosition
+        }
+        if let link = hyperLinkTracking {
+            hyperLinkTracking = (
+                start: Position(col: normalBuffer.x, row: normalBuffer.yBase + normalBuffer.y),
+                payload: link.payload
+            )
+        }
+
+        // The replaced rows no longer own placements. Keep decoded image resources and
+        // any live multi-chunk transfer, which subsequent protocol commands may reference.
+        kittyGraphicsState.placementsByKey = kittyGraphicsState.placementsByKey.filter {
+            $0.value.isAlternateBuffer
+        }
+        userScrolling = false
+        refreshStart = 0
+        refreshEnd = rows - 1
+        scrollInvariantRefreshStart = 0
+        scrollInvariantRefreshEnd = replacementLines.count - 1
+        tdel?.scrolled(source: self, yDisp: normalBuffer.yDisp)
+        return true
+    }
     
     public func resetNormalBuffer() {
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
@@ -1762,13 +1865,16 @@ open class Terminal {
                     
                     // Between the time the flag was set, and now `y` might have changed negatively,
                     // in that case, we do not flag any sequence as a hyperlink
-                    if hlt.start.row <= buffer.y+buffer.yBase {
-                        for y in hlt.start.row...(buffer.y+buffer.yBase) {
+                    let currentRow = buffer.y + buffer.yBase
+                    if hlt.start.row <= currentRow {
+                        for y in hlt.start.row...currentRow {
                             let line = buffer.lines [y]
-                            let startCol = y == hlt.start.row ? min (hlt.start.col, cols-1) : 0
-                            let endCol = y == buffer.y ? min (buffer.x, cols-1) : (marginMode ? buffer.marginRight : cols-1)
+                            let startCol = y == hlt.start.row ? min (hlt.start.col, cols) : 0
+                            // The cursor is after the linked text, and y is buffer-relative
+                            // here (including history), not a screen-relative row.
+                            let endCol = y == currentRow ? min (buffer.x, cols) : (marginMode ? min(buffer.marginRight + 1, cols) : cols)
                             if endCol > startCol {
-                                for x in startCol...endCol {
+                                for x in startCol..<endCol {
                                     var cd = line [x]
                                     cd.setPayload(atom: urlToken)
                                     line [x] = cd

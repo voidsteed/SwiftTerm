@@ -370,6 +370,30 @@ public final class Buffer {
         // Figure out how to do this elegantly
         // SetupTabStops ()
     }
+
+    /// Installs independently owned rows without resetting this buffer's terminal modes,
+    /// margins, tab stops, or saved cursor. The caller has already bounded and validated
+    /// the rows against this buffer's capacity and geometry.
+    func replaceContents(lines newLines: [BufferLine], cursorX: Int, cursorY: Int) {
+        let replacement = CircularBufferLineList(maxLength: getCorrectBufferLength(rows))
+        replacement.makeEmpty = { [unowned self] _ in
+            getBlankLine(attribute: CharData.defaultAttr, isWrapped: false)
+        }
+        for line in newLines {
+            replacement.push(line)
+        }
+        _lines = replacement
+        setupLinesCallbacks()
+        _linesWithImagesCount = 0
+        _yBase = newLines.count - rows
+        _yDisp = _yBase
+        xBase = 0
+        xDisp = 0
+        linesTop = 0
+        _x = cursorX
+        _y = cursorY
+        lastBufferStorage = (0, 0, 0, 0)
+    }
     
     public func softReset ()
     {
@@ -425,7 +449,7 @@ public final class Buffer {
             // Deal with columns increasing (reducing needs to happen after reflow)
             
             if cols < newCols {
-                for i in 0..<lines.maxLength {
+                for i in 0..<lines.count {
                     lines [i].resize (cols: newCols, fillData: CharData.Null)
                 }
 
@@ -507,7 +531,7 @@ public final class Buffer {
             reflow (newCols, newRows)
             // Trim the end of the line off if cols shrunk
             if cols > newCols {
-                for i in 0..<lines.maxLength {
+                for i in 0..<lines.count {
                     lines [i].resize (cols: newCols, fillData: CharData.Null)
                 }
             }
@@ -515,7 +539,7 @@ public final class Buffer {
         
         // DEBUG: Post-condition
         if lines.count > 0 {
-            for i in 0..<lines.maxLength {
+            for i in 0..<lines.count {
                 let line = lines [i]
                 if line.count < newCols {
                     print ("stop here newCols=\(newCols) but the element has: \(line.count)")
